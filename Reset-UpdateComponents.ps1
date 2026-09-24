@@ -3,6 +3,10 @@
     Resets Windows Update, BITS, Delivery Optimization and SCCM update components on remote computers.
 
 .EXAMPLE
+    .\Reset-UpdateComponents.ps1
+    Runs on this computer (requires an elevated PowerShell).
+
+.EXAMPLE
     .\Reset-UpdateComponents.ps1 -ComputerName PC01, PC02
 
 .EXAMPLE
@@ -10,8 +14,7 @@
 #>
 
 param(
-    # Target computers. If omitted, PowerShell prompts for them one by one (empty line to finish).
-    [Parameter(Mandatory)]
+    # Target computers. If omitted, the script runs on this computer.
     [string[]]$ComputerName
 )
 
@@ -86,6 +89,17 @@ $ScriptBlock = {
 
     # Only reached if nothing above failed
     Write-Host "[$name] Done." -ForegroundColor Green
+}
+
+# Local mode: no computer names given, so run the block directly (no WinRM needed)
+if (-not $ComputerName) {
+    # Stopping services and renaming system folders needs administrator rights
+    $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'Run this script from an elevated PowerShell (Run as administrator).'
+    }
+    & $ScriptBlock   # "&" runs the block in a child scope, same code the remote computers run
+    return           # Skip the remote section below
 }
 
 foreach ($computer in $ComputerName) {
