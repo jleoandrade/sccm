@@ -31,6 +31,13 @@ $LogFolder    = Join-Path $ReportFolder "logs"   # remote logs: D:\jorge\Install
 $ReportPrefix = "install_kb_sep26"
 $CycleIntervalSeconds = 180   # 3-minute pause between cycles
 $FreeSpaceMarginGB    = 10    # required free space on C: = MSU size + this margin (the CU installation also consumes disk space)
+
+# Fast connectivity timeouts (milliseconds)
+$Timeouts = @{
+    PingMs        = 1000    # per ping attempt (2 attempts)
+    WinRMPortMs   = 3000    # TCP connect to WinRM port 5985
+    SessionOpenMs = 20000   # max wait to open a remote session (Invoke-Command default is 3 minutes)
+}
 $script:StopRequested = $false
 
 # ==========================
@@ -367,7 +374,42 @@ $btnInstall.Add_Click({
 
     # Parallel Execution Code Block
     $ScriptBlock = {
-        param($ComputerName, $Source23H2, $Source24H2, $Source25H2, $RemoteFolder, $syncHelper, $ExpectedUBR, $CleanupScriptText, $LogFolder, $FreeSpaceMarginGB)
+        param($ComputerName, $Source23H2, $Source24H2, $Source25H2, $RemoteFolder, $syncHelper, $ExpectedUBR, $CleanupScriptText, $LogFolder, $FreeSpaceMarginGB, $Timeouts)
+
+        # Every Invoke-Command in this thread gives up opening the session after SessionOpenMs (does not limit the install itself)
+        $PSDefaultParameterValues = @{ 'Invoke-Command:SessionOption' = (New-PSSessionOption -OpenTimeout $Timeouts.SessionOpenMs) }
+
+        # Fast ping using .NET with a real timeout (Test-Connection waits ~4s per attempt on offline hosts)
+        function Test-Ping ($Name, $TimeoutMs) {
+            $ping = New-Object System.Net.NetworkInformation.Ping
+            try {
+                for ($i = 0; $i -lt 2; $i++) {
+                    try {
+                        if ($ping.Send($Name, $TimeoutMs).Status -eq 'Success') { return $true }
+                    } catch {
+                        return $false   # name could not be resolved
+                    }
+                }
+                return $false
+            } finally {
+                $ping.Dispose()
+            }
+        }
+
+        # Fast WinRM check: TCP connect to port 5985 with a timeout (Test-WSMan has no timeout and can hang)
+        function Test-TcpPort ($Name, $Port, $TimeoutMs) {
+            $client = New-Object System.Net.Sockets.TcpClient
+            try {
+                $connect = $client.BeginConnect($Name, $Port, $null, $null)
+                if (-not $connect.AsyncWaitHandle.WaitOne($TimeoutMs)) { return $false }
+                $client.EndConnect($connect)
+                return $true
+            } catch {
+                return $false
+            } finally {
+                $client.Close()
+            }
+        }
 
         function Report ([hashtable]$Values) {
             [void]$syncHelper.UpdateRow($ComputerName, $Values)
@@ -453,17 +495,15 @@ $btnInstall.Add_Click({
 
         try {
             Report @{ Status = "Checking Ping" }
-            if (-not (Test-Connection -ComputerName $ComputerName -Count 2 -Quiet)) {
+            if (-not (Test-Ping -Name $ComputerName -TimeoutMs $Timeouts.PingMs)) {
                 Report @{ Ping = "Failed" }
                 throw "Host offline or not responding to ping."
             }
             Report @{ Ping = "OK"; Status = "Checking WinRM" }
 
-            try {
-                Test-WSMan -ComputerName $ComputerName -ErrorAction Stop | Out-Null
-            } catch {
+            if (-not (Test-TcpPort -Name $ComputerName -Port 5985 -TimeoutMs $Timeouts.WinRMPortMs)) {
                 Report @{ WinRM = "Failed" }
-                throw "WinRM not reachable. Enable WinRM on the target."
+                throw "WinRM not reachable (port 5985 timeout). Enable WinRM on the target."
             }
             Report @{ WinRM = "OK" }
             $hostReachable = $true
@@ -681,6 +721,7 @@ $btnInstall.Add_Click({
             [void]$powershell.AddArgument($cleanupScriptText)
             [void]$powershell.AddArgument($LogFolder)
             [void]$powershell.AddArgument($FreeSpaceMarginGB)
+            [void]$powershell.AddArgument($Timeouts)
             $handle = $powershell.BeginInvoke()
             $runningThreads += [PSCustomObject]@{ Instance = $powershell; Handle = $handle }
         }
