@@ -376,8 +376,6 @@ $btnInstall.Add_Click({
     $ScriptBlock = {
         param($ComputerName, $Source23H2, $Source24H2, $Source25H2, $RemoteFolder, $syncHelper, $ExpectedUBR, $CleanupScriptText, $LogFolder, $FreeSpaceMarginGB, $Timeouts)
 
-        # Every Invoke-Command in this thread gives up opening the session after SessionOpenMs (does not limit the install itself)
-        $PSDefaultParameterValues = @{ 'Invoke-Command:SessionOption' = (New-PSSessionOption -OpenTimeout $Timeouts.SessionOpenMs) }
 
         # Fast ping using .NET with a real timeout (Test-Connection waits ~4s per attempt on offline hosts)
         function Test-Ping ($Name, $TimeoutMs) {
@@ -495,6 +493,10 @@ $btnInstall.Add_Click({
 
         try {
             Report @{ Status = "Checking Ping" }
+
+            # Every Invoke-Command in this thread gives up opening the session after SessionOpenMs (does not limit the install itself)
+            $PSSessionOption = New-PSSessionOption -OpenTimeout ([int]$Timeouts.SessionOpenMs)
+
             if (-not (Test-Ping -Name $ComputerName -TimeoutMs $Timeouts.PingMs)) {
                 Report @{ Ping = "Failed" }
                 throw "Host offline or not responding to ping."
@@ -723,7 +725,7 @@ $btnInstall.Add_Click({
             [void]$powershell.AddArgument($FreeSpaceMarginGB)
             [void]$powershell.AddArgument($Timeouts)
             $handle = $powershell.BeginInvoke()
-            $runningThreads += [PSCustomObject]@{ Instance = $powershell; Handle = $handle }
+            $runningThreads += [PSCustomObject]@{ Instance = $powershell; Handle = $handle; HostName = $hostName }
         }
 
         $stopSent = $false
@@ -742,9 +744,31 @@ $btnInstall.Add_Click({
         }
 
         foreach ($thread in $runningThreads) {
-            try { $thread.Instance.EndInvoke($thread.Handle) } catch {}  # a stopped thread throws PipelineStoppedException
+            $threadError = $null
+            try {
+                [void]$thread.Instance.EndInvoke($thread.Handle)
+            } catch {
+                # a stopped thread throws PipelineStoppedException; any other exception means the thread crashed
+                $threadError = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
+            }
+            if (-not $threadError -and $thread.Instance.Streams.Error.Count -gt 0) {
+                $threadError = $thread.Instance.Streams.Error[0].ToString()
+            }
+
+            # A thread that never reported a status crashed silently: show why instead of leaving it as Queued
+            if (-not $script:StopRequested) {
+                foreach ($row in $grid.Rows) {
+                    if ($row.Cells["Host"].Value -eq $thread.HostName -and $row.Cells["Status"].Value -eq "Queued") {
+                        $row.Cells["Status"].Value = "Error"
+                        $row.Cells["Detail"].Value = "Worker thread failed: $threadError"
+                        Set-RowColor $row
+                        break
+                    }
+                }
+            }
             $thread.Instance.Dispose()
         }
+        Update-Counters
 
         if ($script:StopRequested) {
             foreach ($row in $grid.Rows) {
