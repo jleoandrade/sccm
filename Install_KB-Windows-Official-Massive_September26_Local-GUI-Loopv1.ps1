@@ -255,7 +255,7 @@ function Set-RowColor {
         "Queued"                         { $color = [System.Drawing.Color]::White;      break }
         default                          { $color = [System.Drawing.Color]::LightYellow }  # in progress
     }
-    $Row.DefaultCellStyle.BackColor = $color
+    if ($Row.DefaultCellStyle.BackColor -ne $color) { $Row.DefaultCellStyle.BackColor = $color }
 }
 
 # Counters above the grid
@@ -270,24 +270,18 @@ function Update-Counters {
                         "Queued: $($counts.Queued)  |  Stopped: $($counts.Stopped)"
 }
 
-# $Values = hashtable { ColumnName = Value }; only the columns provided are changed
-function Update-GridRow {
-    param($HostName, [hashtable]$Values)
-
-    $form.Invoke([Action]{
-        foreach ($row in $grid.Rows) {
-            if ($row.Cells["Host"].Value -eq $HostName) {
-                foreach ($key in $Values.Keys) {
-                    $row.Cells[$key].Value = $Values[$key]
-                }
-                if ($Values.ContainsKey("Status")) {
-                    Set-RowColor $row
-                    Update-Counters
-                }
-                break
-            }
+# Copies the data written by the worker threads ($syncState) into the grid.
+# Runs only on the UI thread: worker threads never touch the form.
+function Sync-Grid {
+    foreach ($row in $grid.Rows) {
+        $data = $syncState[[string]$row.Cells["Host"].Value]
+        if ($null -eq $data) { continue }
+        foreach ($key in $data.Keys) {
+            if ([string]$row.Cells[$key].Value -ne [string]$data[$key]) { $row.Cells[$key].Value = $data[$key] }
         }
-    })
+        Set-RowColor $row
+    }
+    Update-Counters
 }
 
 # Creates D:\jorge\InstallKB_Report\install_kb_sep26_<date>_<time>.csv with the current grid content
@@ -374,8 +368,7 @@ $btnInstall.Add_Click({
 
     # Parallel Execution Code Block
     $ScriptBlock = {
-        param($ComputerName, $Source23H2, $Source24H2, $Source25H2, $RemoteFolder, $syncHelper, $ExpectedUBR, $CleanupScriptText, $LogFolder, $FreeSpaceMarginGB, $Timeouts)
-
+        param($ComputerName, $Source23H2, $Source24H2, $Source25H2, $RemoteFolder, $syncState, $ExpectedUBR, $CleanupScriptText, $LogFolder, $FreeSpaceMarginGB, $Timeouts)
 
         # Fast ping using .NET with a real timeout (Test-Connection waits ~4s per attempt on offline hosts)
         function Test-Ping ($Name, $TimeoutMs) {
@@ -409,8 +402,11 @@ $btnInstall.Add_Click({
             }
         }
 
+        # Thread only writes data; the UI thread copies it to the grid (Sync-Grid)
+        $hostState = @{}
         function Report ([hashtable]$Values) {
-            [void]$syncHelper.UpdateRow($ComputerName, $Values)
+            foreach ($key in $Values.Keys) { $hostState[$key] = $Values[$key] }
+            $syncState[$ComputerName] = $hostState.Clone()
         }
 
         function Get-FreeSpaceGB {
@@ -685,11 +681,8 @@ $btnInstall.Add_Click({
     # Initialize lightweight Runspace Pool
     $runspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxParallel)
     $runspacePool.Open()
-    $syncHelper = [PSCustomObject]@{ Form = $form; Grid = $grid }
-    $syncHelper | Add-Member -MemberType ScriptMethod -Name UpdateRow -Value {
-        param($h, $values)
-        Update-GridRow $h $values
-    }
+    # Thread-safe table: host -> latest values written by its worker thread
+    $syncState = [hashtable]::Synchronized(@{})
 
     $cycle = 0
     $lastReport = ""
@@ -702,6 +695,7 @@ $btnInstall.Add_Click({
         $cycle++
         $form.Text = "Windows 11 Security Updates Remote Installer - Cycle $cycle"
 
+        $syncState.Clear()
         $grid.Rows.Clear()
         foreach ($h in $hosts) {
             [void]$grid.Rows.Add($h, "", "Queued", "", "", "")
@@ -718,7 +712,7 @@ $btnInstall.Add_Click({
             [void]$powershell.AddArgument($Source24H2)
             [void]$powershell.AddArgument($Source25H2)
             [void]$powershell.AddArgument($RemoteFolder)
-            [void]$powershell.AddArgument($syncHelper)
+            [void]$powershell.AddArgument($syncState)
             [void]$powershell.AddArgument($ExpectedUBR)
             [void]$powershell.AddArgument($cleanupScriptText)
             [void]$powershell.AddArgument($LogFolder)
@@ -729,7 +723,14 @@ $btnInstall.Add_Click({
         }
 
         $stopSent = $false
+        $nextSync = Get-Date
         while ($runningThreads.Handle.IsCompleted -contains $false) {
+            # Refresh the grid every 500 ms
+            if ((Get-Date) -ge $nextSync) {
+                Sync-Grid
+                $nextSync = (Get-Date).AddMilliseconds(500)
+            }
+
             # Stop: interrupts running threads and the ones still queued
             if ($script:StopRequested -and -not $stopSent) {
                 foreach ($thread in $runningThreads) {
@@ -742,6 +743,7 @@ $btnInstall.Add_Click({
             [System.Windows.Forms.Application]::DoEvents()
             Start-Sleep -Milliseconds 100
         }
+        Sync-Grid   # final state of this cycle, before checks and CSV export
 
         foreach ($thread in $runningThreads) {
             $threadError = $null
