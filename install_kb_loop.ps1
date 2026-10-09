@@ -38,6 +38,7 @@ $Timeouts = @{
     WinRMPortMs      = 3000    # TCP connect to WinRM port 5985 / SMB port 445
     SessionOpenMs    = 20000   # max wait to open a remote session (Invoke-Command default is 3 minutes)
     PsExecConnectSec = 10      # PsExec -n: max wait to connect to the host
+    PsExecAttempts   = 3       # PsExec tries when the command never started on the host (e.g. "Error communicating with PsExec service")
 }
 
 # ==========================
@@ -454,11 +455,37 @@ Export-Clixml -InputObject $res -Path "$base\$id.result.xml"
             $PsExecWrapper.Replace("__ID__", $id).Replace("__CODE__", $Code.ToString()) |
                 Set-Content -Path "$share\$id.ps1" -Encoding UTF8 -ErrorAction Stop
 
+            $resultFile = "$share\$id.result.xml"
+            try {
+                for ($attempt = 1; $attempt -le $Timeouts.PsExecAttempts; $attempt++) {
+                    $run = Invoke-PsExec -ScriptName "$id.ps1" -TimeoutMinutes $TimeoutMinutes
+                    if (Test-Path $resultFile) { break }
+
+                    # PsExec separates its progress lines with a bare carriage return, so split on both CR and LF
+                    $lastLine = $run.StdErr -split "[\r\n]+" | Where-Object { $_.Trim() } | Select-Object -Last 1
+                    # "<program> exited on <host> with error code N" = the command really ran: never run it twice.
+                    # Without it the command never started (e.g. "Error communicating with PsExec service"), so a retry is safe.
+                    $commandRan = $run.StdErr -match 'exited on .+ with error code'
+                    if ($commandRan -or $attempt -eq $Timeouts.PsExecAttempts) {
+                        throw "PsExec failed (exit $($run.ExitCode), attempt $attempt of $($Timeouts.PsExecAttempts)): $lastLine"
+                    }
+                    Start-Sleep -Seconds (10 * $attempt)   # give the previous PSEXESVC time to stop, then retry
+                }
+                $result = Import-Clixml -Path $resultFile
+            } finally {
+                Remove-Item -Path "$share\$id.*" -Force -ErrorAction SilentlyContinue
+            }
+            if (-not $result.Ok) { throw "Remote error: $($result.Error)" }
+            return $result.Output
+        }
+
+        # Runs PsExec once on this host and waits for it. Returns its exit code and error output.
+        function Invoke-PsExec ($ScriptName, $TimeoutMinutes) {
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName  = $PsExecPath
             # no -nobanner: older PsExec versions (e.g. v2.11) reject it and exit with -1
             $psi.Arguments = "\\$ComputerName -accepteula -s -n $($Timeouts.PsExecConnectSec) " +
-                             "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\Windows\Temp\CUInstall\$id.ps1"
+                             "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\Windows\Temp\CUInstall\$ScriptName"
             $psi.UseShellExecute        = $false
             $psi.CreateNoWindow         = $true
             $psi.RedirectStandardInput  = $true    # closed right away, otherwise PsExec can wait for input forever
@@ -474,19 +501,11 @@ Export-Clixml -InputObject $res -Path "$base\$id.result.xml"
                 while (-not $proc.WaitForExit(500)) {                 # short waits keep the Stop button responsive
                     if ((Get-Date) -gt $deadline) { throw "PsExec timeout after $TimeoutMinutes min" }
                 }
-                $resultFile = "$share\$id.result.xml"
-                if (-not (Test-Path $resultFile)) {
-                    $lastLine = $errReader.Result -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -Last 1
-                    throw "PsExec failed (exit $($proc.ExitCode)): $lastLine"
-                }
-                $result = Import-Clixml -Path $resultFile
+                return [PSCustomObject]@{ ExitCode = $proc.ExitCode; StdErr = $errReader.Result }
             } finally {
                 if (-not $proc.HasExited) { try { $proc.Kill() } catch {} }   # stops the local PsExec only
                 $proc.Dispose()
-                Remove-Item -Path "$share\$id.*" -Force -ErrorAction SilentlyContinue
             }
-            if (-not $result.Ok) { throw "Remote error: $($result.Error)" }
-            return $result.Output
         }
 
         # Runs on the host: release, build, UBR and free space on C:
