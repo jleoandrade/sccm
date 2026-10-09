@@ -456,7 +456,8 @@ Export-Clixml -InputObject $res -Path "$base\$id.result.xml"
 
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName  = $PsExecPath
-            $psi.Arguments = "\\$ComputerName -accepteula -nobanner -s -n $($Timeouts.PsExecConnectSec) " +
+            # no -nobanner: older PsExec versions (e.g. v2.11) reject it and exit with -1
+            $psi.Arguments = "\\$ComputerName -accepteula -s -n $($Timeouts.PsExecConnectSec) " +
                              "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\Windows\Temp\CUInstall\$id.ps1"
             $psi.UseShellExecute        = $false
             $psi.CreateNoWindow         = $true
