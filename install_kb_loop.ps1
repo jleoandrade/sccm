@@ -186,60 +186,149 @@ $DiskCleanupScript = {
 # ==========================
 # GUI SETUP
 # ==========================
+# Color palette (change the hex values here to restyle the whole window)
+$Theme = @{
+    Header      = "#1A1A1A"   # top bar and grid column headers
+    Accent      = "#A100FF"   # purple: primary button, top bar strip
+    AccentSoft  = "#F3E8FF"   # light purple: selected row, rows in progress
+    Page        = "#F5F5F7"   # window background
+    Card        = "#FFFFFF"   # text box and grid background
+    Text        = "#1A1A1A"
+    TextMuted   = "#6B6B6B"
+    Border      = "#E3E3E3"
+    SuccessSoft = "#E7F6EC"   # Finished / Skipped rows
+    ErrorSoft   = "#FDE8E8"   # Failed / Error rows
+    StoppedSoft = "#EDEDEF"   # Stopped rows
+}
+function Get-ThemeColor ($Name) { [System.Drawing.ColorTranslator]::FromHtml($Theme[$Name]) }
+
+$fontRegular = New-Object System.Drawing.Font("Segoe UI", 9)
+$fontBold    = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Windows 11 Security Updates Remote Installer"
-$form.Size = New-Object System.Drawing.Size(1050, 700)
+$form.Size = New-Object System.Drawing.Size(1050, 768)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
 $form.MaximizeBox = $false
+$form.BackColor = Get-ThemeColor "Page"
+$form.ForeColor = Get-ThemeColor "Text"
+$form.Font = $fontRegular
+
+# Top bar: dark background + purple strip underneath
+$pnlHeader = New-Object System.Windows.Forms.Panel
+$pnlHeader.Location = New-Object System.Drawing.Point(0, 0)
+$pnlHeader.Size = New-Object System.Drawing.Size($form.ClientSize.Width, 56)
+$pnlHeader.BackColor = Get-ThemeColor "Header"
+$form.Controls.Add($pnlHeader)
+
+$lblBadge = New-Object System.Windows.Forms.Label
+$lblBadge.Text = "KB"
+$lblBadge.TextAlign = "MiddleCenter"
+$lblBadge.Location = New-Object System.Drawing.Point(16, 14)
+$lblBadge.Size = New-Object System.Drawing.Size(28, 28)
+$lblBadge.BackColor = Get-ThemeColor "Accent"
+$lblBadge.ForeColor = [System.Drawing.Color]::White
+$lblBadge.Font = $fontBold
+$pnlHeader.Controls.Add($lblBadge)
+
+$lblTitle = New-Object System.Windows.Forms.Label
+$lblTitle.Text = "Windows 11 Security Updates Remote Installer"
+$lblTitle.Location = New-Object System.Drawing.Point(54, 15)
+$lblTitle.Size = New-Object System.Drawing.Size(600, 26)
+$lblTitle.ForeColor = [System.Drawing.Color]::White
+$lblTitle.Font = New-Object System.Drawing.Font("Segoe UI", 13, [System.Drawing.FontStyle]::Bold)
+$pnlHeader.Controls.Add($lblTitle)
+
+$pnlStrip = New-Object System.Windows.Forms.Panel
+$pnlStrip.Location = New-Object System.Drawing.Point(0, 56)
+$pnlStrip.Size = New-Object System.Drawing.Size($form.ClientSize.Width, 3)
+$pnlStrip.BackColor = Get-ThemeColor "Accent"
+$form.Controls.Add($pnlStrip)
+
+# Buttons: Primary = purple filled, Dark = black filled, Outline = white with dark border
+function Set-ButtonStyle ($Button, $Style) {
+    $Button.FlatStyle = "Flat"
+    $Button.Font = $fontBold
+    $Button.Cursor = [System.Windows.Forms.Cursors]::Hand
+    switch ($Style) {
+        "Primary" { $Button.BackColor = Get-ThemeColor "Accent"; $Button.ForeColor = [System.Drawing.Color]::White; $Button.FlatAppearance.BorderSize = 0 }
+        "Dark"    { $Button.BackColor = Get-ThemeColor "Header"; $Button.ForeColor = [System.Drawing.Color]::White; $Button.FlatAppearance.BorderSize = 0 }
+        "Outline" { $Button.BackColor = Get-ThemeColor "Card";   $Button.ForeColor = Get-ThemeColor "Text"; $Button.FlatAppearance.BorderColor = Get-ThemeColor "Text"; $Button.FlatAppearance.BorderSize = 1 }
+    }
+}
 
 $txtHosts = New-Object System.Windows.Forms.TextBox
 $txtHosts.Multiline = $true
 $txtHosts.ScrollBars = "Vertical"
-$txtHosts.Location = New-Object System.Drawing.Point(10, 35)
+$txtHosts.Location = New-Object System.Drawing.Point(10, 103)
 $txtHosts.Size = New-Object System.Drawing.Size(250, 515)
+$txtHosts.BorderStyle = "FixedSingle"
+$txtHosts.BackColor = Get-ThemeColor "Card"
+$txtHosts.Font = New-Object System.Drawing.Font("Segoe UI", 10)
 $form.Controls.Add($txtHosts)
 
 $lblHosts = New-Object System.Windows.Forms.Label
-$lblHosts.Text = "Hosts - 1 per line"
-$lblHosts.Location = New-Object System.Drawing.Point(10, 10)
-$lblHosts.Size = New-Object System.Drawing.Size(200, 20)
+$lblHosts.Text = "HOSTS  -  1 PER LINE"
+$lblHosts.Location = New-Object System.Drawing.Point(10, 78)
+$lblHosts.Size = New-Object System.Drawing.Size(250, 20)
+$lblHosts.Font = $fontBold
 $form.Controls.Add($lblHosts)
 
 $btnStop = New-Object System.Windows.Forms.Button
 $btnStop.Text = "Stop Process"
-$btnStop.Location = New-Object System.Drawing.Point(10, 560)
+$btnStop.Location = New-Object System.Drawing.Point(10, 628)
 $btnStop.Size = New-Object System.Drawing.Size(250, 35)
 $btnStop.Enabled = $false
+Set-ButtonStyle $btnStop "Dark"
 $form.Controls.Add($btnStop)
 
 $btnLoad = New-Object System.Windows.Forms.Button
 $btnLoad.Text = "Load hosts.txt"
-$btnLoad.Location = New-Object System.Drawing.Point(10, 605)
+$btnLoad.Location = New-Object System.Drawing.Point(10, 673)
 $btnLoad.Size = New-Object System.Drawing.Size(120, 35)
+Set-ButtonStyle $btnLoad "Outline"
 $form.Controls.Add($btnLoad)
 
 $btnInstall = New-Object System.Windows.Forms.Button
 $btnInstall.Text = "Install CU"
-$btnInstall.Location = New-Object System.Drawing.Point(140, 605)
+$btnInstall.Location = New-Object System.Drawing.Point(140, 673)
 $btnInstall.Size = New-Object System.Drawing.Size(120, 35)
+Set-ButtonStyle $btnInstall "Primary"
 $form.Controls.Add($btnInstall)
 
 $lblCounters = New-Object System.Windows.Forms.Label
 $lblCounters.Text = ""
-$lblCounters.Location = New-Object System.Drawing.Point(275, 10)
+$lblCounters.Location = New-Object System.Drawing.Point(275, 78)
 $lblCounters.Size = New-Object System.Drawing.Size(750, 20)
-$lblCounters.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$lblCounters.Font = $fontBold
 $form.Controls.Add($lblCounters)
 
 $grid = New-Object System.Windows.Forms.DataGridView
-$grid.Location = New-Object System.Drawing.Point(275, 35)
+$grid.Location = New-Object System.Drawing.Point(275, 103)
 $grid.Size = New-Object System.Drawing.Size(750, 605)
 $grid.AllowUserToAddRows = $false
 $grid.ReadOnly = $true
 $grid.RowHeadersVisible = $false
 $grid.SelectionMode = "FullRowSelect"
 $grid.AutoSizeColumnsMode = "Fill"
+$grid.BackgroundColor = Get-ThemeColor "Card"
+$grid.BorderStyle = "FixedSingle"
+$grid.GridColor = Get-ThemeColor "Border"
+$grid.CellBorderStyle = "SingleHorizontal"
+$grid.EnableHeadersVisualStyles = $false    # required for the custom header colors
+$grid.ColumnHeadersBorderStyle = "None"
+$grid.ColumnHeadersHeightSizeMode = "DisableResizing"
+$grid.ColumnHeadersHeight = 34
+$grid.ColumnHeadersDefaultCellStyle.BackColor = Get-ThemeColor "Header"
+$grid.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+$grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = Get-ThemeColor "Header"
+$grid.ColumnHeadersDefaultCellStyle.Font = $fontBold
+$grid.DefaultCellStyle.Font = $fontRegular
+$grid.DefaultCellStyle.ForeColor = Get-ThemeColor "Text"
+$grid.DefaultCellStyle.SelectionBackColor = Get-ThemeColor "Accent"
+$grid.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
+$grid.RowTemplate.Height = 26
 
 [void]$grid.Columns.Add("Host","Host")
 [void]$grid.Columns.Add("Release","Release (Build)")
@@ -263,11 +352,11 @@ $form.Controls.Add($grid)
 function Set-RowColor {
     param($Row)
     switch ([string]$Row.Cells["Status"].Value) {
-        { $_ -in "Finished", "Skipped" } { $color = [System.Drawing.Color]::LightGreen; break }
-        { $_ -in "Failed", "Error" }     { $color = [System.Drawing.Color]::LightCoral; break }
-        "Stopped"                        { $color = [System.Drawing.Color]::LightGray;  break }
-        "Queued"                         { $color = [System.Drawing.Color]::White;      break }
-        default                          { $color = [System.Drawing.Color]::LightYellow }  # in progress
+        { $_ -in "Finished", "Skipped" } { $color = Get-ThemeColor "SuccessSoft"; break }
+        { $_ -in "Failed", "Error" }     { $color = Get-ThemeColor "ErrorSoft";   break }
+        "Stopped"                        { $color = Get-ThemeColor "StoppedSoft"; break }
+        "Queued"                         { $color = Get-ThemeColor "Card";        break }
+        default                          { $color = Get-ThemeColor "AccentSoft" }  # in progress
     }
     if ($Row.DefaultCellStyle.BackColor -ne $color) { $Row.DefaultCellStyle.BackColor = $color }
 }
@@ -692,8 +781,16 @@ Export-Clixml -InputObject $res -Path "$base\$id.result.xml"
                 default { throw "Unsupported Release: $release" }
             }
 
-            $msu = Get-ChildItem -Path $source -Filter *.msu -File | Select-Object -First 1
-            if (-not $msu) { throw "No .msu file found in source folder" }
+            # Each Source folder must hold exactly one .msu; the messages name the folder and the reason
+            if (-not (Test-Path -LiteralPath $source)) {
+                throw "Source folder for $release not found or no access: $source"
+            }
+            $msuFiles = @(Get-ChildItem -LiteralPath $source -Filter *.msu -File -ErrorAction Stop)
+            if ($msuFiles.Count -eq 0) { throw "No .msu file found in the $release source folder: $source" }
+            if ($msuFiles.Count -gt 1) {
+                throw "More than one .msu in the $release source folder (keep only one): $($msuFiles.Name -join ', ')"
+            }
+            $msu = $msuFiles[0]
 
             $kbId = "KB-Install"
             if ($msu.Name -match "KB\d+") { 
