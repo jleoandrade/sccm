@@ -4,16 +4,24 @@ setlocal
 title Windows 11 CU Installer
 
 rem ---------------------------------------------------------------------------
-rem  1. Ask for administrator rights when not elevated (same as "Run as administrator")
+rem  1. Ask for administrator rights when not elevated (same as "Run as administrator").
+rem     A mapped drive letter (e.g. H:\) is turned into its \\server\share path first,
+rem     because the elevated session does not see the drive letters of the user.
 rem ---------------------------------------------------------------------------
 net session >nul 2>&1
 if errorlevel 1 (
-    powershell.exe -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    powershell.exe -NoProfile -Command "$f = '%~f0'; $d = Get-PSDrive -Name $f.Substring(0, 1) -ErrorAction SilentlyContinue; if ($d.DisplayRoot) { $f = $d.DisplayRoot.TrimEnd('\') + $f.Substring(2) }; Start-Process -FilePath $f -Verb RunAs"
     exit /b
 )
 
 rem ---------------------------------------------------------------------------
-rem  2. PowerShell only runs .ps1 files: copy this file to a temporary .ps1,
+rem  2. KB_HOME = folder of this file. The script saves its reports there and looks
+rem     for PsExec.exe there, so InstallKB.cmd works from any folder.
+rem ---------------------------------------------------------------------------
+set "KB_HOME=%~dp0"
+
+rem ---------------------------------------------------------------------------
+rem  3. PowerShell only runs .ps1 files: copy this file to a temporary .ps1,
 rem     run it (window hidden, GUI only) and delete the copy at the end.
 rem     A startup error is shown in a message box instead of a hidden console.
 rem ---------------------------------------------------------------------------
@@ -33,41 +41,66 @@ exit /b
 #>
 
 # ============================================================================
-#  PowerShell script starts here. Edit the configuration below as usual.
-#  (Line numbers are 39 higher than in install_kb_loop.ps1.)
+#  PowerShell script starts here. The setting to change each month is $KBSource below.
+#  (Line numbers are 47 higher than in install_kb_loop.ps1.)
 # ============================================================================
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# ==========================
-# KB SOURCES
-# ==========================
-$Source23H2 = "\\SERVER\Sources\Manual-installations\2026-09_Cumulative_Update_for_Windows_11_23H2"
-$Source24H2 = "\\SERVER\Sources\Manual-installations\2026-09_Cumulative_Update_for_Windows_11_24H2"
-$Source25H2 = "\\SERVER\Sources\Manual-installations\2026-09_Cumulative_Update_for_Windows_11_25H2"
+# ============================================================================
+#  THE ONLY SETTING TO CHANGE EACH MONTH
+# ============================================================================
+# Server folder with the MSU of each Windows 11 release. {RELEASE} is replaced by 23H2, 24H2 and 25H2,
+# so this one line points to the three folders. Each release folder must hold exactly one .msu.
+$KBSource = "\\SERVER\Sources\Manual-installations\2026-09_Cumulative_Update_for_Windows_11_{RELEASE}"
+
+# ============================================================================
+#  EVERYTHING BELOW WORKS AS IT IS (optional settings)
+# ============================================================================
+$Source23H2 = $KBSource.Replace("{RELEASE}", "23H2")
+$Source24H2 = $KBSource.Replace("{RELEASE}", "24H2")
+$Source25H2 = $KBSource.Replace("{RELEASE}", "25H2")
 
 $RemoteFolder = "C:\Windows\Temp\CUInstall"
 $MaxParallel  = 15
 
-# ==========================
-# EXPECTED BUILD (UBR) - CU 2026-09
-# ==========================
-# UBR = number after the dot in the OS Build (e.g. 26100.9445 -> 9445)
-# 23H2: KB5122880 = 22631.7582 | 24H2/25H2: KB5124008 = 26100.9445 / 26200.9445
-# Set to 0 to disable the UBR check for that release (falls back to Get-HotFix only)
+# Expected build (UBR = number after the dot in the OS Build, e.g. 26100.9445 -> 9445).
+# 0 = the "already installed" check uses only the KB (Get-HotFix). This is the safe default:
+# an old UBR left here would make machines without the new CU be skipped as "already installed".
+# To also check the build, fill in the values of the month (e.g. 23H2 = 7582, 24H2/25H2 = 9445 for 2026-09).
 $ExpectedUBR = @{
-    "23H2" = 7582
-    "24H2" = 9445
-    "25H2" = 9445
+    "23H2" = 0
+    "24H2" = 0
+    "25H2" = 0
 }
 
-# ==========================
-# REPORT OUTPUT / LOOP
-# ==========================
-$ReportFolder = "D:\jorge\InstallKB_Report"
-$LogFolder    = Join-Path $ReportFolder "logs"   # remote logs: D:\jorge\InstallKB_Report\logs\<host>\
-$ReportPrefix = "install_kb_sep26"
+# Folder of InstallKB.cmd (set by the launcher), or of this .ps1 when it is run directly
+$AppFolder = if ($env:KB_HOME) { $env:KB_HOME.TrimEnd('\') } elseif ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }
+
+# Reports and logs: "InstallKB_Report" next to InstallKB.cmd. If that folder is read-only, the first
+# writable one of: Documents, the user profile, the temporary folder (empty entries are skipped)
+function Get-WritableFolder ([string[]]$BaseFolders) {
+    foreach ($base in $BaseFolders) {
+        if (-not $base) { continue }
+        $folder = Join-Path $base "InstallKB_Report"
+        try {
+            New-Item -ItemType Directory -Path $folder -Force -ErrorAction Stop | Out-Null
+            $probe = Join-Path $folder ".write_test"
+            Set-Content -Path $probe -Value "" -ErrorAction Stop
+            Remove-Item -Path $probe -Force -ErrorAction SilentlyContinue
+            return $folder
+        } catch { }
+    }
+    return (Join-Path ([System.IO.Path]::GetTempPath()) "InstallKB_Report")
+}
+$ReportFolder = Get-WritableFolder @($AppFolder, [Environment]::GetFolderPath("MyDocuments"), $env:USERPROFILE, [System.IO.Path]::GetTempPath())
+$LogFolder    = Join-Path $ReportFolder "logs"   # remote logs: <ReportFolder>\logs\<host>\
+
+# CSV name: install_kb_<month taken from $KBSource>_<date>_<time>.csv
+$KBMonth      = if ($KBSource -match '\d{4}-\d{2}') { $Matches[0] } else { Get-Date -Format "yyyy-MM" }
+$ReportPrefix = "install_kb_$KBMonth"
+
 $CycleIntervalSeconds = 180   # 3-minute pause between cycles
 $FreeSpaceMarginGB    = 10    # required free space on C: = MSU size + this margin (the CU installation also consumes disk space)
 
@@ -84,7 +117,16 @@ $Timeouts = @{
 # REMOTE ACCESS FALLBACK
 # ==========================
 # WinRM is tried first. If it fails, the script uses PsExec (runs as SYSTEM) + the admin share \\host\C$
-$PsExecPath = "D:\Jorge\PSTools\PsExec.exe"
+# PsExec is found automatically: next to InstallKB.cmd, in a PSTools subfolder, in the PATH, or in D:\Jorge\PSTools
+$PsExecPath = @(
+    (Join-Path $AppFolder "PsExec.exe"),
+    (Join-Path $AppFolder "PsExec64.exe"),
+    (Join-Path $AppFolder "PSTools\PsExec.exe"),
+    (Join-Path $AppFolder "PSTools\PsExec64.exe"),
+    (Get-Command PsExec.exe, PsExec64.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Path),
+    "D:\Jorge\PSTools\PsExec.exe"
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+if (-not $PsExecPath) { $PsExecPath = Join-Path $AppFolder "PsExec.exe" }   # not found: the error message says where to put it
 
 # MSU copy order (the next method is tried automatically if one fails):
 #   Push = this PC copies the MSU to \\host\C$\Windows\Temp\CUInstall
@@ -286,6 +328,18 @@ $lblTitle.ForeColor = [System.Drawing.Color]::White
 $lblTitle.Font = New-Object System.Drawing.Font("Segoe UI", 13, [System.Drawing.FontStyle]::Bold)
 $pnlHeader.Controls.Add($lblTitle)
 
+# Right side of the top bar: KB month and where the reports are saved (full text in the tooltip)
+$lblInfo = New-Object System.Windows.Forms.Label
+$lblInfo.Text = "KB $KBMonth   |   Reports: $ReportFolder"
+$lblInfo.Location = New-Object System.Drawing.Point(660, 19)
+$lblInfo.Size = New-Object System.Drawing.Size(($form.ClientSize.Width - 676), 20)
+$lblInfo.TextAlign = "MiddleRight"
+$lblInfo.AutoEllipsis = $true
+$lblInfo.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#BDBDBD")
+$pnlHeader.Controls.Add($lblInfo)
+$tipInfo = New-Object System.Windows.Forms.ToolTip
+$tipInfo.SetToolTip($lblInfo, "KB source: $KBSource`r`nReports: $ReportFolder`r`nPsExec: $PsExecPath")
+
 $pnlStrip = New-Object System.Windows.Forms.Panel
 $pnlStrip.Location = New-Object System.Drawing.Point(0, 56)
 $pnlStrip.Size = New-Object System.Drawing.Size($form.ClientSize.Width, 3)
@@ -433,7 +487,7 @@ function Sync-Grid {
     Update-Counters
 }
 
-# Creates D:\jorge\InstallKB_Report\install_kb_sep26_<date>_<time>.csv with the current grid content
+# Creates <ReportFolder>\install_kb_<month>_<date>_<time>.csv with the current grid content
 function Export-GridReport {
     param($Cycle)
 
@@ -508,6 +562,12 @@ $btnInstall.Add_Click({
 
     if ($hosts.Count -eq 0) {
         [System.Windows.Forms.MessageBox]::Show("Please provide at least one host.")
+        return
+    }
+
+    # One line ($KBSource) feeds the three release folders, so it must contain {RELEASE}
+    if ($KBSource -notlike "*{RELEASE}*") {
+        [void][System.Windows.Forms.MessageBox]::Show("The KB source must contain {RELEASE} (replaced by 23H2, 24H2 and 25H2):`r`n$KBSource", "KB source")
         return
     }
 
@@ -687,7 +747,7 @@ Export-Clixml -InputObject $res -Path "$base\$id.result.xml"
             return $after
         }
 
-        # Copies the host logs to D:\jorge\InstallKB_Report\logs\<host>\ (date/time prefix keeps the history)
+        # Copies the host logs to <ReportFolder>\logs\<host>\ (date/time prefix keeps the history)
         function Save-RemoteLogs {
             try {
                 $remoteDir = "\\$ComputerName\C$\Windows\Temp\CUInstall"
